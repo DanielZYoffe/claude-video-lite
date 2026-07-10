@@ -739,20 +739,27 @@ def detect_scenes_pyscenedetect(
 def _frames_for_scene(duration: float, per_scene_budget: int) -> int:
     """Frames to sample from a single scene based on its duration.
 
-    Very short scenes (quick cuts): 1 representative frame.
-    Short scenes: 2 frames (start context + end context).
-    Medium scenes: several evenly spaced (~1 per 6 s).
-    Long scenes: lower density (~1 per 15 s) to avoid burning the budget on a
-    single talking-head or static segment.
+    Categories are calibrated to match or beat the old scene engine (1 frame
+    per cut) for short scenes, while providing better coverage for long scenes
+    where the old uniform fallback was expensive:
+
+      very short  (<5 s)  → 1 frame  (quick cut, representative midpoint)
+      short       (<30 s) → 2 frames (slide/brief segment: start + end)
+      medium      (<120 s)→ 3 frames (section or explanation)
+      long        (≥120 s)→ ~1 per 90 s, min 4 (chapter/topic)
+
+    The long tier is intentionally lower-density than uniform sampling
+    (~1 per 7.5 s at balanced/80-frame budget) so a single talking-head
+    chapter does not consume the entire frame budget.
     """
-    if duration < 3.0:
+    if duration < 5.0:
         n = 1
-    elif duration < 10.0:
-        n = 2
     elif duration < 30.0:
-        n = max(3, int(duration / 6))
+        n = 2
+    elif duration < 120.0:
+        n = 3
     else:
-        n = max(4, int(duration / 15))
+        n = max(4, int(duration / 90))
     return min(n, per_scene_budget)
 
 
