@@ -1,69 +1,113 @@
 # /watch
 
-**Give Claude the ability to watch any video.**
+paste url. claude watches.
 
-Paste a URL or a local file path, ask a question, and Claude fetches captions, extracts frames using scene-aware adaptive sampling, and answers based on what it actually saw — not the title, not a transcript excerpt, the video.
+Give Claude vision for any video. YouTube, TikTok, Loom, screen recordings, local files — anything `yt-dlp` touches. Captions first (free, instant). Frames extracted only when needed. Answers grounded in what's actually on screen, not the title.
 
 [![Release](https://img.shields.io/github/v/release/DanielZYoffe/claude-video-lite?label=release&color=238636)](https://github.com/DanielZYoffe/claude-video-lite/releases/latest)
 [![License](https://img.shields.io/github/license/DanielZYoffe/claude-video-lite?color=0969da)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3572A5)](https://python.org)
 
+[See it](#before--after) · [Install](#install) · [Detail modes](#detail-modes) · [Benchmarks](#benchmarks) · [How it works](#how-it-works)
+
 ---
 
-**Claude Code** (auto-updates via marketplace):
+/watch is a skill for Claude Code, Codex, Cursor, Copilot, and 50+ other agents. Install once. Paste a URL or path, ask a question. The skill pulls captions when they exist, otherwise downloads the minimum needed audio for Whisper. It extracts frames using scene-aware adaptive sampling — spending tokens on distinct content, not held slides or static screens. By the time Claude answers, it has seen the video. Not a description of it. The video.
+
+## Before / After
+
+| 🗣️ Without /watch | /watch |
+|---|---|
+| *"I'm unable to access YouTube or watch videos. Based on the title 'Docker multi-stage builds', I can explain how multi-stage builds work in general terms — they allow you to use multiple FROM statements in a Dockerfile, which helps reduce the final image size..."* | She covers three patterns: builder stage at 4:12, distroless base at 11:30 (smallest output), BuildKit cache mounts at 18:45. Cache mounts are the one you'd use for a Node project. |
+| *"I can't play video files. Could you describe what's happening on screen, share the relevant code, or paste any error messages you see?"* | Crash at 0:23. Stack trace: `NullPointerException` in `UserService.getById` — `user` is null when the token expires. You added a null check at 0:41 but it's on the wrong branch. |
+
+Same question. Completely different answer.
+
+```
+┌────────────────────────────────────────────┐
+│   frame tokens vs uniform    ████████   −64% │
+│   captioned videos           █████████  free │
+│   sources supported          █████████   any │
+│   code / paths in transcript █████████  100% │
+└────────────────────────────────────────────┘
+```
+
+/watch no add hallucination. /watch add vision.
+
+---
+
+## Install
+
+One command. Finds every agent on your machine.
+
+**Claude Code** (marketplace, auto-updates):
 ```
 /plugin marketplace add bradautomates/claude-video
 /plugin install watch@claude-video
 ```
 
-**Codex, Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:**
+**Codex, Cursor, Copilot, Gemini CLI, and 50+ others:**
 ```bash
 npx skills add bradautomates/claude-video -g
 ```
 
-More install options in [Install](#install).
+`-g` installs globally (`~/.codex/skills`, `~/.cursor/skills`, etc.). Drop it for per-project only. Safe to re-run.
+
+> **Tip** — First `/watch` call runs a preflight check. On macOS it auto-installs `ffmpeg` and `yt-dlp` via brew. On Linux and Windows it prints the exact commands. Takes ~30 seconds once, then silent forever.
+
+**claude.ai (web):** Download [`watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) → Settings → Capabilities → Skills → `+`. Enable **Code execution and file creation** first.
+
+**Manual:** `git clone` then `ln -s "$(pwd)/claude-video-lite/skills/watch" ~/.claude/skills/watch`.
 
 ---
+
+## Detail modes
+
+Four modes. Switch per-call with `--detail`.
+
+| Mode | Engine | Frame cap | Extraction | When to use |
+|---|---|---|---|---|
+| `transcript` | captions only | 0 | ~4.5 s | Full-length talks, podcasts, anything with good captions |
+| `efficient` | keyframes | 50 | ~0.5 s | Quick visual scan, fast iteration |
+| `balanced` *(default)* | adaptive (PySceneDetect) | 100 | ~21 s | General use — scene-aware, deduped |
+| `token-burner` | adaptive, uncapped | none | ~21 s | Cut-heavy content, don't want to miss anything |
+
+Numbers from a real **49:08** video (1280×720, auto-captions), pre-downloaded.
+
+`efficient` is ~40× faster than the scene modes — it only reconstructs keyframes rather than decoding every frame to find cuts. On low-motion footage it can return *more* frames than `balanced`.
+
+Set `WATCH_DETAIL` in `~/.config/watch/.env` to change your default.
+
+---
+
+## What you get
+
+| Flag | What it does |
+|---|---|
+| `/watch <url> [question]` | Core command. URL or local path. Question optional. |
+| `--detail transcript\|efficient\|balanced\|token-burner` | Fidelity dial. |
+| `--start` / `--end` | Focus window (`SS`, `MM:SS`, `HH:MM:SS`). Denser budget, lower cost. |
+| `--timestamps T1,T2,…` | Grab a frame at exact moments. Added on top of detail frames. With `--detail transcript`, these become the only frames. |
+| `--max-frames N` | Hard cap for a tighter token budget. |
+| `--resolution 1024` | Wider frames (default 512 px). Use when Claude needs to read on-screen text. |
+| `--no-dedup` | Keep near-duplicate frames. Off by default — dedup drops held slides and static screens before they reach Claude. |
+| `--no-whisper` | Frames only. No transcript. |
+| `--whisper groq\|openai` | Force a specific Whisper backend (default: Groq if key present, else OpenAI). |
 
 ```
 /watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-/watch ~/Downloads/bug-repro.mov what's going wrong?
-/watch https://vimeo.com/123456789 --start 2:15 --end 2:45
+/watch ~/Downloads/bug-repro.mov when does it crash?
+/watch "$URL" --start 2:15 --end 2:45
+/watch "$URL" --detail transcript --timestamps 4:12,11:30,18:45
 ```
-
-Zero config to start. `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS. Linux and Windows print the exact commands. Captions cover most public videos for free — Whisper is only needed when a video genuinely has no caption track.
 
 ---
 
-## Adaptive frame selection
+## Benchmarks
 
-Frames dominate token cost. A naïve uniform sampler sends up to 80 frames for a 10-minute video. The `balanced` and `token-burner` modes use a four-step adaptive pipeline instead:
+Real frame counts, structural selection only (dedup disabled). Formula: **1,683 tokens per 512 px frame** (512×288 → 1 tile → 1,598 + 85).
 
-1. **Scene detection** — [PySceneDetect](https://github.com/Breakthrough/PySceneDetect) finds scene boundaries more reliably than ffmpeg's scene filter.
-2. **Per-scene sampling** — frame count per scene scales with duration: short scenes get 1–2 frames, long chapters get 1 per 90 s.
-3. **Perceptual dedup** — 16×16 grayscale thumbnail comparison drops frames that are visually identical to the one before them (held slides, static screen recordings).
-4. **Parity cap** — if the old pipeline's scene engine would have run (≥ 8 detected cuts), output is capped at `n_scenes` so adaptive never exceeds the old 1-frame-per-cut baseline.
-
-The selection stats print to **stderr** on every run so they don't add to Claude's context:
-
-```
-────────────────────────────────────────────────
-Adaptive Frame Selection
-  Video duration:              12:34
-  Detected scenes:             8
-  Frames before deduplication: 8
-  Frames after deduplication:  7
-  Final frames sent to Claude: 7
-  Reduction vs uniform:        91%
-────────────────────────────────────────────────
-```
-
-### Token savings benchmark
-
-Measured structurally (dedup disabled) across 6 representative video types.
-Formula: **1,683 tokens per 512 px frame** (512×288 → 1 tile → 1,598 + 85).
-
-| Content type | Old engine | Old frames | Adaptive | vs. old | vs. uniform |
+| Content type | Old pipeline | Old frames | Adaptive | vs. old | vs. 80-frame uniform |
 |---|---|---|---|---|---|
 | Talking head (10 min, 2 sections) | uniform fallback | 80 | **19** | **−76%** | −76% |
 | Lecture + slides (8 min, 16 slides) | scene engine | 14 | **16** | +14% | −80% |
@@ -71,205 +115,44 @@ Formula: **1,683 tokens per 512 px frame** (512×288 → 1 tile → 1,598 + 85).
 | Quick demo (90 s, 18 cuts) | scene engine | 16 | **15** | −6% | −81% |
 | Long course (20 min, 12 chapters) | scene engine | 11 | **12** | +9% | −85% |
 | Screen recording (6 min, 4 switches) | uniform fallback | 80 | **19** | **−76%** | −76% |
-| **Total (6 scenarios)** | | **281 frames** | **100 frames** | **−64%** | **−75%** |
+| **Total** | | **281** | **100** | **−64%** | **−75%** |
 
-**64% fewer tokens overall. 265k tokens saved across 6 scenarios.**
+**64% fewer frame tokens. 265k tokens saved across 6 scenarios.**
 
-The old pipeline had a hard threshold (`SCENE_MIN_FRAMES = 8`): if fewer than 8 cuts were detected by ffmpeg's filter, it discarded the scene data and fell back to uniform sampling — up to 80 frames regardless of content. Three of the six benchmark types hit that fallback (talking head, 5-min tutorial, screen recording) because they have clear visual sections but fewer than 8 hard cuts. PySceneDetect finds those sections reliably; the adaptive sampler then allocates by duration instead.
+The old pipeline had a hard threshold: if fewer than 8 cuts were detected by ffmpeg's scene filter, it discarded the scene data and fell back to uniform sampling — up to 80 frames regardless of content. Three of the six benchmark types hit that fallback. PySceneDetect finds those section boundaries reliably; the adaptive sampler then allocates by duration. A parity cap ensures adaptive never exceeds the old scene engine's 1-frame-per-cut baseline on cut-heavy content — the +9%/+14% cases above are 1–2 extra frames from PySceneDetect detecting slightly more boundaries than ffmpeg's filter.
 
-For cut-heavy content already handled efficiently by the old scene engine, the parity cap ensures adaptive never exceeds the old baseline. The +9%/+14% cases above are 1–2 extra frames from PySceneDetect detecting slightly more scene boundaries than ffmpeg's filter — negligible in practice.
+> **Honest numbers.** The −64% is frame *input* tokens only. Output tokens and reasoning tokens are untouched. On already-efficient content (cut-heavy videos the old scene engine handled well), adaptive is roughly neutral. On long videos with transcript mode, frame tokens are 0 — the dominant cost is the transcript itself. When adaptive wins hardest: 10+ minute talking-head content that would have burned 80 frames on uniform sampling.
 
 ---
 
 ## How it works
 
-1. **You paste a URL or path.** Anything `yt-dlp` supports — YouTube, Loom, TikTok, X, Instagram, Vimeo, plus hundreds more — or a local `.mp4`, `.mov`, `.mkv`, `.webm`.
-2. **Captions first.** At `transcript` detail, captioned URLs return without downloading video. Otherwise `yt-dlp` pulls native captions (manual or auto-generated) from the source.
-3. **Frames extracted at the chosen detail.** `efficient` decodes keyframes only (near-instant). `balanced`/`token-burner` run the adaptive pipeline above. JPEGs are 512 px wide by default, clamped to 1998 px tall for Claude `Read` compatibility.
-4. **Whisper fallback for audio.** When no caption track exists, the script extracts a mono 16 kHz 64 kbps mp3 (~480 kB/min) and ships it to Whisper — Groq's `whisper-large-v3` (preferred) or OpenAI's `whisper-1`.
-5. **Frames + transcript handed to Claude.** Frame paths print with `t=MM:SS` markers. Claude `Read`s each frame in parallel — JPEGs render directly as images in context.
-6. **Cleanup.** Working directory printed at the end; Claude removes it after follow-ups finish.
-
----
-
-## Detail modes
-
-Numbers from a real run against a **49:08** YouTube video (1280×720, auto-captions). Pre-downloaded; extraction time only.
-
-| Mode | Engine | Frames | Cap | Extraction | Est. image tokens |
-|------|--------|--------|-----|------------|-------------------|
-| `transcript` | none (captions only) | 0 | — | **~4.5 s** | 0 (~26.6k text) |
-| `efficient` | keyframe (`-skip_frame nokey`) | 50 | 50 | **~0.5 s** | ~9.8k |
-| `balanced` | adaptive (PySceneDetect) | 100 | 100 | **~20.9 s** | ~19.7k |
-| `token-burner` | adaptive (uncapped) | 116 | none | **~21.0 s** | ~22.8k |
-
-- `efficient` is ~40× faster than the scene modes — it only reconstructs keyframes rather than decoding every frame to find cuts. It can return *more* frames than `balanced` on low-motion footage.
-- `token-burner` only diverges from `balanced` past the cap. On this clip (116 scene cuts) `balanced` sampled 100 and `token-burner` kept all 116.
-- Image token estimate uses Anthropic's tile formula at 512 px width. `--resolution 1024` roughly 4×s that.
-
----
-
-## Frame deduplication
-
-Even after scene-aware sampling, consecutive frames can still be near-identical — a slide held for 90 seconds, a screen recording with no movement. The dedup pass drops them before they reach Claude. Runs by default; `--no-dedup` turns it off.
-
-1. Each extracted JPEG is scaled to a 16×16 grayscale thumbnail (one `ffmpeg` call per frame). Pure-stdlib Python from here.
-2. Mean absolute pixel difference against the *last kept frame* — not the previous one. This catches slow fades that never trip a frame-to-frame threshold.
-3. Frames at or below threshold (`2.0`) are dropped. Above threshold: kept, becomes new reference.
-
-The `Frames:` line in Claude's report shows what collapsed: `7 selected from 14 candidates (7 near-duplicates dropped)`. On always-moving footage nothing drops and you pay what you'd have anyway.
-
----
-
-## Install
-
-| Surface | Command |
-|---------|---------|
-| **Claude Code** | `/plugin marketplace add bradautomates/claude-video` then `/plugin install watch@claude-video` |
-| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add bradautomates/claude-video -g` |
-| **claude.ai (web)** | [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
-| **Manual / dev** | `git clone` then symlink `skills/watch/` into your host's skills dir |
-
-### Claude Code
-
-```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
-```
-
-Update: `/plugin update watch@claude-video`.
-
-### Codex, Cursor, Copilot, Gemini CLI, and 50+ others
-
-```bash
-npx skills add bradautomates/claude-video -g
-```
-
-`-g` installs globally (`~/.codex/skills`, `~/.cursor/skills`, etc.). Drop it for per-project install. Useful flags: `-a codex -a cursor` to target specific hosts, `--copy` for filesystems without symlink support.
-
-Update: `npx skills update watch -g`.
-
-### claude.ai (web)
-
-1. [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) from the latest release.
-2. Settings → Capabilities → Skills → `+`.
-3. Enable **Code execution and file creation** under Capabilities — the skill shells out to `ffmpeg` and `yt-dlp`.
-
-### Manual (dev)
-
-```bash
-git clone https://github.com/DanielZYoffe/claude-video-lite.git
-ln -s "$(pwd)/claude-video-lite/skills/watch" ~/.claude/skills/watch
-```
-
-Build the `.skill` bundle from source: `bash skills/watch/scripts/build-skill.sh` → `dist/watch.skill`.
-
----
-
-## First run
-
-On the first `/watch` call, `scripts/setup.py --check` runs automatically. If `ffmpeg` / `yt-dlp` aren't on PATH or no API key is set, it walks through fixing it:
-
-- **macOS** — auto-runs `brew install ffmpeg yt-dlp`
-- **Linux** — prints the exact `apt` / `dnf` / `pipx` commands
-- **Windows** — prints the `winget` / `pip` commands
-- **API key** — scaffolds `~/.config/watch/.env` (mode `0600`) with commented placeholders
-
-After setup, preflight is silent — sub-100ms on subsequent runs.
-
----
-
-## Usage
-
-```
-/watch <url-or-path> [question]
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-/watch https://www.tiktok.com/@user/video/123 summarize this
-/watch ~/Movies/screen-recording.mp4 when does the UI break?
-```
-
-Focus on a section for denser per-second budgets (capped at 2 fps):
-```
-/watch https://youtu.be/abc --start 2:15 --end 2:45
-/watch video.mp4 --start 50 --end 60
-/watch "$URL" --start 1:12:00            # from 1h12m to end
-```
-
-### Flags (passed to `scripts/watch.py`)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--detail` | `balanced` | `transcript` (captions only), `efficient` (keyframes, cap 50), `balanced` (adaptive, cap 100), `token-burner` (adaptive, uncapped) |
-| `--start` / `--end` | — | Focus window. Accepts `SS`, `MM:SS`, `HH:MM:SS`. |
-| `--timestamps T1,T2,…` | — | Grab a frame at each timestamp. Added on top of detail frames. With `--detail transcript`, these become the only frames. |
-| `--max-frames N` | — | Override the frame cap for a tighter token budget. |
-| `--resolution W` | `512` | Frame width in pixels. Use `1024` when Claude needs to read on-screen text (slides, terminals, code). |
-| `--fps F` | auto | Override auto-fps (still capped at 2 fps). |
-| `--whisper groq\|openai` | auto | Force a specific Whisper backend. |
-| `--no-whisper` | — | Disable transcription entirely; frames only. |
-| `--no-dedup` | — | Keep near-duplicate frames. |
-| `--out-dir DIR` | auto tmp | Keep working files in a specific location. |
-
-Set `WATCH_DETAIL` in `~/.config/watch/.env` to change the default detail level.
+1. **Captions first.** `yt-dlp` checks for native captions (manual or auto-generated). At `transcript` detail, captioned URLs return without downloading any video.
+2. **Download what's needed.** When frames are required, `yt-dlp` downloads the video. When Whisper is needed for audio, a mono 16 kHz 64 kbps mp3 is extracted (~480 kB/min).
+3. **Adaptive frame extraction.** PySceneDetect finds scene boundaries. Frames are allocated per scene by duration (1–2 for short scenes, ~1 per 90 s for long chapters). A perceptual dedup pass drops visually identical consecutive frames before they reach Claude.
+4. **Frames + transcript handed to Claude.** Frame paths print with `t=MM:SS` markers. Claude `Read`s each JPEG in parallel — they render directly as images in context.
+5. **Cleanup.** Working directory printed at the end. Claude removes it after follow-ups finish.
 
 ---
 
 ## API keys
 
-Captions cover most public videos for free. Whisper is only needed for local files, TikToks, some Vimeos, and the occasional caption-less YouTube upload.
+Captions cover most public videos for free. Whisper only fires for local files, TikToks, some Vimeos, and caption-less uploads.
 
-| Capability | What you need | Cost |
+| What you need | Why | Cost |
 |---|---|---|
-| Download + native captions | `yt-dlp` + `ffmpeg` | Free |
-| Whisper fallback (preferred) | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
-| Whisper fallback (alt) | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard |
-| Frames only, no transcript | `--no-whisper` | Free |
+| `yt-dlp` + `ffmpeg` | Download + captions + frames | Free |
+| [Groq API key](https://console.groq.com/keys) | Whisper fallback (`whisper-large-v3`) | Cheap, fast |
+| [OpenAI API key](https://platform.openai.com/api-keys) | Whisper fallback alt (`whisper-1`) | Standard |
+
+Keys live in `~/.config/watch/.env` (mode `0600`). `setup.py` scaffolds the file on first run.
 
 ---
 
-## Limits
+## Privacy
 
-- **Long-video accuracy depends on detail mode.** On capped modes, coverage thins past ~10 minutes — the frame budget spreads across the full clip. The script prints a "sparse scan" warning. Re-run with `--start`/`--end` focused on the section that matters, or use `--detail token-burner` to lift the cap.
-- **PySceneDetect optional.** If the `scenedetect` package isn't installed, `balanced` and `token-burner` fall back to the existing ffmpeg-based scene engine. Install with `pip install scenedetect` to enable the adaptive pipeline.
-
----
-
-## Structure
-
-```
-.
-├── skills/watch/                 # self-contained skill — copied as a unit by every installer
-│   ├── SKILL.md                  # skill contract — source of truth across all surfaces
-│   └── scripts/
-│       ├── watch.py              # entry point — download → frames → transcript
-│       ├── frames.py             # adaptive frame extraction, scene detection, dedup
-│       ├── download.py           # yt-dlp wrapper
-│       ├── transcribe.py         # VTT parsing + dedup + Whisper orchestration
-│       ├── whisper.py            # Groq / OpenAI clients (pure stdlib)
-│       ├── config.py             # shared config (~/.config/watch/.env)
-│       ├── setup.py              # preflight + auto-installer
-│       └── build-skill.sh        # build dist/watch.skill for claude.ai upload
-├── hooks/                        # SessionStart status hook (Claude Code only)
-├── .claude-plugin/               # plugin.json + marketplace.json (Claude Code)
-├── .codex-plugin/                # Codex/agents manifest
-├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # release.yml — builds watch.skill on tag push
-```
+/watch no phone home. No telemetry, no analytics, no accounts, no backend. After install, zero network calls except the ones you explicitly trigger — `yt-dlp` to fetch the video, Whisper API if you have a key and the video has no captions. Both are spelled out in the skill output. Everything else runs locally.
 
 ---
 
-## Develop
-
-```bash
-# Run the test suite (ffmpeg required for frame tests):
-python3 -m pytest -q
-
-# Build the claude.ai upload bundle:
-bash skills/watch/scripts/build-skill.sh      # → dist/watch.skill
-```
-
-Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` and attaches it to the GitHub release. Keep the version in sync across `skills/watch/SKILL.md`, `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`.
-
----
-
-MIT license. Built on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), [`ffmpeg`](https://ffmpeg.org), [`PySceneDetect`](https://github.com/Breakthrough/PySceneDetect), and Claude's multimodal `Read` tool.
+MIT — built on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), [`ffmpeg`](https://ffmpeg.org), [`PySceneDetect`](https://github.com/Breakthrough/PySceneDetect), and Claude's multimodal `Read` tool.
