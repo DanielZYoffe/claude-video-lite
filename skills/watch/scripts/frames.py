@@ -893,6 +893,17 @@ def extract_adaptive(
         new_ts = [t for t in dense_ts if t not in existing_set][:needed]
         all_timestamps = sorted(set(all_timestamps) | set(new_ts))
 
+    # Scene-engine parity cap: when PySceneDetect found enough scenes that the
+    # old pipeline would have run its scene engine (≥ ADAPTIVE_MIN_FRAMES cuts),
+    # cap output at n_scenes so adaptive never costs more than the old
+    # 1-frame-per-cut baseline. Coverage is preserved via even-sampling so
+    # every scene still contributes at least one timestamp.
+    parity_capped = False
+    if n_scenes >= ADAPTIVE_MIN_FRAMES and len(all_timestamps) > n_scenes:
+        indices = _even_indices(len(all_timestamps), n_scenes)
+        all_timestamps = [all_timestamps[i] for i in indices]
+        parity_capped = True
+
     # Cap at the overall frame budget (even-sample first+last kept).
     if max_frames is not None and len(all_timestamps) > max_frames:
         indices = _even_indices(len(all_timestamps), max_frames)
@@ -922,6 +933,7 @@ def extract_adaptive(
         "uniform_target": uniform_count,
         "reduction_pct": reduction_pct,
         "fallback": False,
+        "parity_capped": parity_capped,
     }
 
 

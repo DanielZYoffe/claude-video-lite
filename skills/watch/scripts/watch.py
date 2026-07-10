@@ -39,6 +39,8 @@ def _print_adaptive_stats(meta: dict, duration: float) -> None:
     print(f"  Frames after deduplication:  {after_dedup}", file=sys.stderr)
     print(f"  Final frames sent to Claude: {meta['selected_count']}", file=sys.stderr)
     print(f"  Reduction vs uniform:        {meta['reduction_pct']}%", file=sys.stderr)
+    if meta.get("parity_capped"):
+        print(f"  Parity cap applied:          yes (capped to {meta['scene_count']} scenes)", file=sys.stderr)
     print(bar, file=sys.stderr)
     print(file=sys.stderr)
 
