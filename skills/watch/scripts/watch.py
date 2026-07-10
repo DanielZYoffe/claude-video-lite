@@ -17,9 +17,32 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from config import frame_cap, get_config  # noqa: E402
 from download import download, fetch_captions, is_url  # noqa: E402
-from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
+from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_adaptive, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
+
+
+def _print_adaptive_stats(meta: dict, duration: float) -> None:
+    """Print adaptive frame selection stats to stderr.
+
+    Goes to stderr so it appears in the user's terminal without adding to the
+    Claude context window — saving image-adjacent text tokens in the prompt.
+    """
+    bar = "─" * 44
+    after_dedup = meta["candidate_count"] - meta["deduped_count"]
+    print(file=sys.stderr)
+    print(bar, file=sys.stderr)
+    print("Adaptive Frame Selection", file=sys.stderr)
+    print(f"  Video duration:              {format_time(duration)}", file=sys.stderr)
+    print(f"  Detected scenes:             {meta['scene_count']}", file=sys.stderr)
+    print(f"  Frames before deduplication: {meta['candidate_count']}", file=sys.stderr)
+    print(f"  Frames after deduplication:  {after_dedup}", file=sys.stderr)
+    print(f"  Final frames sent to Claude: {meta['selected_count']}", file=sys.stderr)
+    print(f"  Reduction vs uniform:        {meta['reduction_pct']}%", file=sys.stderr)
+    if meta.get("parity_capped"):
+        print(f"  Parity cap applied:          yes (capped to {meta['scene_count']} scenes)", file=sys.stderr)
+    print(bar, file=sys.stderr)
+    print(file=sys.stderr)
 
 
 def main() -> int:
@@ -212,7 +235,9 @@ def main() -> int:
                 dedup=not args.no_dedup,
             )
         else:  # balanced, token-burner
-            frames, frame_meta = extract_scene_or_uniform(
+            # extract_adaptive tries PySceneDetect first; falls back to the
+            # existing scene-or-uniform pipeline when the library is absent.
+            frames, frame_meta = extract_adaptive(
                 video_path,
                 work / "frames",
                 fps=fps,
@@ -222,6 +247,17 @@ def main() -> int:
                 start_seconds=start_sec,
                 end_seconds=end_sec,
                 dedup=not args.no_dedup,
+            )
+
+        # Print adaptive stats to stderr so they appear in the terminal but
+        # do not add to the Claude prompt (saves context tokens).
+        if frame_meta.get("adaptive") is True:
+            _print_adaptive_stats(frame_meta, full_duration)
+        elif "adaptive_fallback_reason" in frame_meta:
+            print(
+                f"[watch] adaptive sampling skipped ({frame_meta['adaptive_fallback_reason']}), "
+                f"using {frame_meta['engine']} engine",
+                file=sys.stderr,
             )
 
     if cue_frames:
@@ -289,6 +325,8 @@ def main() -> int:
     if detail != "transcript":
         cap_label = "unlimited" if detail_budget is None else str(detail_budget)
         engine = frame_meta.get("engine", "scene")
+        if frame_meta.get("adaptive") and not frame_meta.get("fallback"):
+            engine = f"adaptive, {frame_meta['scene_count']} scenes"
         fallback = " with uniform fallback" if frame_meta.get("fallback") else ""
         deduped = frame_meta.get("deduped_count", 0)
         dedup_note = f", {deduped} near-duplicate{'s' if deduped != 1 else ''} dropped" if deduped else ""

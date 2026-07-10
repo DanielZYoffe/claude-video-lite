@@ -682,6 +682,261 @@ def extract_keyframes(
     }
 
 
+# ── Adaptive sampling (PySceneDetect pipeline) ────────────────────────────────
+
+ADAPTIVE_PYSCENE_THRESHOLD = 27.0  # ContentDetector default sensitivity
+ADAPTIVE_MIN_FRAMES = 8            # Augment if adaptive yields fewer than this
+
+
+def _pyscenedetect_available() -> bool:
+    """Return True if the scenedetect package can be imported."""
+    try:
+        import scenedetect  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def detect_scenes_pyscenedetect(
+    video_path: str,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+    threshold: float = ADAPTIVE_PYSCENE_THRESHOLD,
+) -> list[tuple[float, float]] | None:
+    """Detect scene boundaries with PySceneDetect's ContentDetector.
+
+    Returns a list of (scene_start, scene_end) second-tuples clipped to
+    [start_seconds, end_seconds], or None when the library is unavailable,
+    detection fails, or no scenes are found. None is the signal to fall back
+    to the existing pipeline.
+    """
+    try:
+        from scenedetect import detect, ContentDetector
+    except ImportError:
+        return None
+    try:
+        raw = detect(
+            str(Path(video_path).resolve()),
+            ContentDetector(threshold=threshold),
+        )
+    except Exception:
+        return None
+    if not raw:
+        return None
+
+    lo = start_seconds or 0.0
+    hi = end_seconds if end_seconds is not None else float("inf")
+    result: list[tuple[float, float]] = []
+    for start_tc, end_tc in raw:
+        s = start_tc.get_seconds()
+        e = end_tc.get_seconds()
+        if s >= hi or e <= lo:
+            continue
+        result.append((max(s, lo), min(e, hi)))
+    return result if result else None
+
+
+def _frames_for_scene(duration: float, per_scene_budget: int) -> int:
+    """Frames to sample from a single scene based on its duration.
+
+    Categories are calibrated to match or beat the old scene engine (1 frame
+    per cut) for short scenes, while providing better coverage for long scenes
+    where the old uniform fallback was expensive:
+
+      very short  (<5 s)  → 1 frame  (quick cut, representative midpoint)
+      short       (<30 s) → 2 frames (slide/brief segment: start + end)
+      medium      (<120 s)→ 3 frames (section or explanation)
+      long        (≥120 s)→ ~1 per 90 s, min 4 (chapter/topic)
+
+    The long tier is intentionally lower-density than uniform sampling
+    (~1 per 7.5 s at balanced/80-frame budget) so a single talking-head
+    chapter does not consume the entire frame budget.
+    """
+    if duration < 5.0:
+        n = 1
+    elif duration < 30.0:
+        n = 2
+    elif duration < 120.0:
+        n = 3
+    else:
+        n = max(4, int(duration / 90))
+    return min(n, per_scene_budget)
+
+
+def _scene_sample_timestamps(scene_start: float, scene_end: float, n: int) -> list[float]:
+    """n timestamps evenly spaced within [scene_start, scene_end].
+
+    n == 1 returns the midpoint; n >= 2 spans from scene_start to scene_end.
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [round((scene_start + scene_end) / 2, 3)]
+    step = (scene_end - scene_start) / (n - 1)
+    return [round(scene_start + i * step, 3) for i in range(n)]
+
+
+def _extract_frames_at_timestamps(
+    video_path: str,
+    out_dir: Path,
+    timestamps: list[float],
+    resolution: int = 512,
+) -> list[dict]:
+    """Extract one frame per timestamp into frame_NNNN.jpg files.
+
+    One ffmpeg seek per timestamp — same approach as extract_at_timestamps but
+    writes to the frame_* namespace so adaptive output slots into the existing
+    pipeline without renaming or path conflicts with cue_*.jpg files.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for existing in out_dir.glob("frame_*.jpg"):
+        existing.unlink()
+
+    out: list[dict] = []
+    for t in timestamps:
+        path = out_dir / f"frame_{len(out):04d}.jpg"
+        cmd = [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{t:.3f}",
+            "-i", str(Path(video_path).resolve()),
+            "-frames:v", "1",
+            "-vf", _scale_filter(resolution),
+            "-q:v", "4",
+            str(path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and path.exists():
+            out.append({
+                "index": len(out),
+                "timestamp_seconds": round(t, 2),
+                "path": str(path),
+                "reason": "adaptive",
+            })
+    return out
+
+
+def extract_adaptive(
+    video_path: str,
+    out_dir: Path,
+    fps: float,
+    target_frames: int,
+    resolution: int = 512,
+    max_frames: int | None = 100,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+    dedup: bool = True,
+) -> tuple[list[dict], dict]:
+    """Adaptive scene-aware frame extraction using PySceneDetect.
+
+    Step 1 — scene detection: PySceneDetect ContentDetector finds scene
+    boundaries. Falls back to extract_scene_or_uniform when unavailable.
+
+    Step 2 — per-scene budgeting: frames are allocated per scene based on
+    duration category (very short/short/medium/long) weighted by scene fraction
+    of total duration.
+
+    Step 3 — perceptual deduplication: near-identical consecutive frames are
+    dropped via dedupe_perceptual (same algorithm as the existing pipeline).
+
+    Step 4 — minimum floor: if adaptive sampling returns suspiciously few
+    frames (e.g. one very long static scene), the longest scene is sampled
+    more densely to avoid under-sampling tutorials and coding videos.
+    """
+    budget = max_frames if max_frames is not None else max(target_frames * 2, 40)
+
+    # Step 1: attempt PySceneDetect scene detection.
+    scenes = detect_scenes_pyscenedetect(video_path, start_seconds, end_seconds)
+
+    if scenes is None:
+        # Library unavailable or detected no boundaries — keep existing behaviour.
+        frames, meta = extract_scene_or_uniform(
+            video_path, out_dir, fps=fps, target_frames=target_frames,
+            resolution=resolution, max_frames=max_frames,
+            start_seconds=start_seconds, end_seconds=end_seconds,
+            dedup=dedup,
+        )
+        meta["adaptive"] = False
+        meta["adaptive_fallback_reason"] = (
+            "pyscenedetect_unavailable"
+            if not _pyscenedetect_available()
+            else "no_scenes_detected"
+        )
+        return frames, meta
+
+    n_scenes = len(scenes)
+    total_duration = sum(e - s for s, e in scenes) or 1.0
+
+    # Step 2: assign frames per scene, weighted by each scene's share of duration.
+    all_timestamps: list[float] = []
+    for scene_start, scene_end in scenes:
+        scene_dur = scene_end - scene_start
+        scene_budget = max(1, round(budget * (scene_dur / total_duration)))
+        n = _frames_for_scene(scene_dur, scene_budget)
+        all_timestamps.extend(_scene_sample_timestamps(scene_start, scene_end, n))
+
+    all_timestamps = sorted(set(round(t, 3) for t in all_timestamps))
+
+    # Step 4 (pre-extraction): augment if result is too sparse.
+    # Triggers when a single very long scene yields only 3–4 frames for a long
+    # video — important for coding tutorials where on-screen content changes
+    # continuously even with no hard scene cuts.
+    min_expected = max(ADAPTIVE_MIN_FRAMES, target_frames // 4)
+    if len(all_timestamps) < min_expected and scenes:
+        longest = max(scenes, key=lambda s: s[1] - s[0])
+        needed = min_expected - len(all_timestamps)
+        dense_ts = _scene_sample_timestamps(
+            longest[0], longest[1],
+            max(needed * 2, int((longest[1] - longest[0]) / 5)),
+        )
+        existing_set = set(all_timestamps)
+        new_ts = [t for t in dense_ts if t not in existing_set][:needed]
+        all_timestamps = sorted(set(all_timestamps) | set(new_ts))
+
+    # Scene-engine parity cap: when PySceneDetect found enough scenes that the
+    # old pipeline would have run its scene engine (≥ ADAPTIVE_MIN_FRAMES cuts),
+    # cap output at n_scenes so adaptive never costs more than the old
+    # 1-frame-per-cut baseline. Coverage is preserved via even-sampling so
+    # every scene still contributes at least one timestamp.
+    parity_capped = False
+    if n_scenes >= ADAPTIVE_MIN_FRAMES and len(all_timestamps) > n_scenes:
+        indices = _even_indices(len(all_timestamps), n_scenes)
+        all_timestamps = [all_timestamps[i] for i in indices]
+        parity_capped = True
+
+    # Cap at the overall frame budget (even-sample first+last kept).
+    if max_frames is not None and len(all_timestamps) > max_frames:
+        indices = _even_indices(len(all_timestamps), max_frames)
+        all_timestamps = [all_timestamps[i] for i in indices]
+
+    pre_dedup_count = len(all_timestamps)
+
+    frames = _extract_frames_at_timestamps(
+        video_path, out_dir, all_timestamps, resolution=resolution,
+    )
+
+    # Step 3: drop near-identical consecutive frames.
+    n_dropped = 0
+    if dedup and len(frames) > 1:
+        frames, n_dropped = dedupe_perceptual(frames)
+
+    uniform_count = max(1, target_frames)
+    reduction_pct = max(0, round((uniform_count - len(frames)) / uniform_count * 100))
+
+    return frames, {
+        "engine": "adaptive",
+        "adaptive": True,
+        "scene_count": n_scenes,
+        "candidate_count": pre_dedup_count,
+        "deduped_count": n_dropped,
+        "selected_count": len(frames),
+        "uniform_target": uniform_count,
+        "reduction_pct": reduction_pct,
+        "fallback": False,
+        "parity_capped": parity_capped,
+    }
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(
